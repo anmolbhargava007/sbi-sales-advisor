@@ -1,4 +1,3 @@
-
 import React, {
   createContext,
   useState,
@@ -362,8 +361,34 @@ export const WorkspaceProvider = ({ children }: { children: ReactNode }) => {
         is_active: true,
       };
 
+      // Create workspace in database
       const response = await workspaceApi.create(newWorkspace);
-      if (response.success) {
+      if (response.success && response.data?.ws_id) {
+        // Generate a session for this workspace
+        const sessionResponse = await llmApi.startSession();
+        if (sessionResponse.success && sessionResponse.session_id) {
+          // Store session ID for this workspace
+          setSessionIds(prev => ({
+            ...prev,
+            [response.data.ws_id!]: sessionResponse.session_id!
+          }));
+          
+          // Initialize empty chat messages and documents for this workspace
+          setChatMessages(prev => ({
+            ...prev,
+            [response.data.ws_id!]: []
+          }));
+          
+          setSessionDocuments(prev => ({
+            ...prev,
+            [response.data.ws_id!]: []
+          }));
+          
+          console.log(`Created new session ${sessionResponse.session_id} for workspace ${response.data.ws_id}`);
+        } else {
+          console.error("Failed to create LLM session for workspace");
+        }
+        
         toast.success("Workspace created successfully");
         await refreshWorkspaces();
       } else {
@@ -464,39 +489,68 @@ export const WorkspaceProvider = ({ children }: { children: ReactNode }) => {
         return false;
       }
 
-      // Upload to LLM service to get session ID
+      // Get session ID for this workspace
       if (selectedWorkspace.ws_id) {
-        try {
-          const result = await llmApi.uploadDocument(file, selectedWorkspace.ws_id);
-          
-          if (result.success && result.session_id) {
+        let sessionId = sessionIds[selectedWorkspace.ws_id];
+        
+        // If no session ID exists, create one
+        if (!sessionId) {
+          const sessionResponse = await llmApi.startSession();
+          if (sessionResponse.success && sessionResponse.session_id) {
+            sessionId = sessionResponse.session_id;
             // Save the session ID for this workspace
             setSessionIds(prev => ({
               ...prev,
-              [selectedWorkspace.ws_id!]: result.session_id!
+              [selectedWorkspace.ws_id!]: sessionId
             }));
-            
+            console.log(`Created new session ${sessionId} for workspace ${selectedWorkspace.ws_id}`);
+          } else {
+            toast.error("Failed to create session for document upload");
+            return false;
+          }
+        }
+
+        // Upload to LLM service with session ID
+        try {
+          const result = await llmApi.uploadDocument(file, sessionId);
+          
+          if (result.success) {
             // Update session documents
-            setSessionDocuments(prev => ({
-              ...prev,
-              [selectedWorkspace.ws_id!]: [file.name]
-            }));
+            setSessionDocuments(prev => {
+              const existingDocs = prev[selectedWorkspace.ws_id!] || [];
+              const updatedDocs = [...existingDocs];
+              
+              // Add file name if it doesn't already exist
+              if (!updatedDocs.includes(file.name)) {
+                updatedDocs.push(file.name);
+              }
+              
+              return {
+                ...prev,
+                [selectedWorkspace.ws_id!]: updatedDocs
+              };
+            });
             
-            // Update current session documents
-            setCurrentSessionDocuments([file.name]);
+            // Update current session documents if this is the selected workspace
+            if (selectedWorkspace.ws_id === selectedWorkspace.ws_id) {
+              setCurrentSessionDocuments(prev => {
+                if (!prev.includes(file.name)) {
+                  return [...prev, file.name];
+                }
+                return prev;
+              });
+            }
             
-            console.log(`Session ID for workspace ${selectedWorkspace.ws_id}: ${result.session_id}`);
-            
-            // Clear chat messages for this workspace to start fresh
-            setChatMessages(prev => ({
-              ...prev,
-              [selectedWorkspace.ws_id!]: []
-            }));
+            console.log(`Document ${file.name} uploaded to session ${sessionId}`);
           } else {
             console.error("Failed to upload to LLM API");
+            toast.error("Failed to process the PDF file");
+            return false;
           }
         } catch (llmErr) {
           console.error("Failed to upload to LLM API:", llmErr);
+          toast.error("Failed to process the PDF file");
+          return false;
         }
       }
 
